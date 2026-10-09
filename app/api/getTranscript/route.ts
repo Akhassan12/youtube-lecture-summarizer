@@ -57,46 +57,77 @@ export async function POST(req: Request) {
 
     const ytDlpPath = getYtDlpPath();
 
-    // Run yt-dlp to download subtitles in the requested language
-    const command = `${ytDlpPath} --extractor-args "youtube:player_client=android,ios,web" --write-sub --write-auto-sub --sub-lang ${lang} --skip-download --output "%(id)s" "${videoUrl}"`;
+    // Run yt-dlp with --ignore-errors and sub-lang fallback (${lang}, original audio captions .*-orig, and all)
+    // This ensures that if YouTube returns HTTP 429 on auto-translated captions, it gracefully falls back to the native transcript
+    const command = `${ytDlpPath} --ignore-errors --write-auto-sub --sub-lang "${lang},${lang}-.*,.*-orig" --skip-download --output "%(id)s" "${videoUrl}"`;
     console.log("🚀 Running command:", command);
 
-    const { stdout, stderr } = await execPromise(command);
-    console.log("📜 yt-dlp stdout:", stdout);
-    if (stderr) console.error("⚠️ yt-dlp stderr:", stderr);
-
-    // Locate downloaded subtitles file
-    let subtitleFile = path.resolve(`./${videoId}.${lang}.vtt`);
-    if (!fs.existsSync(subtitleFile)) {
-      // Look for any subtitle file matching the video ID in current directory
-      const candidates = fs.readdirSync("./").filter((f) => f.startsWith(videoId) && f.endsWith(".vtt"));
-      if (candidates.length > 0) {
-        subtitleFile = path.resolve(`./${candidates[0]}`);
-      }
+    try {
+      const { stdout, stderr } = await execPromise(command);
+      console.log("📜 yt-dlp stdout:", stdout);
+      if (stderr) console.warn("⚠️ yt-dlp stderr:", stderr);
+    } catch (execErr: any) {
+      console.warn("⚠️ yt-dlp completed with warnings (inspecting downloaded files):", execErr?.message || execErr);
     }
 
-    if (!fs.existsSync(subtitleFile)) {
-      console.error(`❌ No subtitles found for language: ${lang}`);
-      return NextResponse.json({ error: `No subtitles found for language: ${lang}` }, { status: 404 });
+    // Locate downloaded subtitles file: prioritize requested language, then native language, then any matching .vtt
+    const allFiles = fs.readdirSync("./");
+    const matchingFiles = allFiles.filter((f) => f.startsWith(videoId) && f.endsWith(".vtt"));
+
+    let targetFile = matchingFiles.find((f) => f === `${videoId}.${lang}.vtt`)
+      || matchingFiles.find((f) => f.startsWith(`${videoId}.${lang}`))
+      || matchingFiles.find((f) => f.includes("orig"))
+      || matchingFiles[0];
+
+    if (!targetFile) {
+      console.error(`❌ No subtitles found for video ID: ${videoId}`);
+      return NextResponse.json(
+        {
+          error: "Could not retrieve subtitles for this video. YouTube may have blocked automated requests (HTTP 429) or captions are unavailable.",
+        },
+        { status: 404 }
+      );
     }
+
+    const subtitleFilePath = path.resolve(`./${targetFile}`);
+    console.log(`📄 Using subtitle file: ${targetFile}`);
 
     // Read and clean up subtitles
-    let subtitles = fs.readFileSync(subtitleFile, "utf8");
+    let subtitles = fs.readFileSync(subtitleFilePath, "utf8");
     try {
-      fs.unlinkSync(subtitleFile); // Delete file after reading
+      // Clean up all matching .vtt files for this video
+      matchingFiles.forEach((f) => {
+        try { fs.unlinkSync(path.resolve(`./${f}`)); } catch {}
+      });
     } catch {
       // Ignore deletion failure
     }
 
-    // Remove timestamps and metadata
+    // Remove timestamps, HTML/formatting tags, and metadata
     subtitles = subtitles
       .split("\n")
-      .filter((line) => !line.startsWith("WEBVTT") && !line.match(/\d{2}:\d{2}:\d{2}/)) // Remove timestamps
-      .map((line) => line.trim())
+      .filter((line) => {
+        const trimmed = line.trim();
+        return (
+          trimmed &&
+          !trimmed.startsWith("WEBVTT") &&
+          !trimmed.startsWith("Kind:") &&
+          !trimmed.startsWith("Language:") &&
+          !trimmed.match(/\d{2}:\d{2}:\d{2}\.\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}\.\d{3}/)
+        );
+      })
+      .map((line) => line.replace(/<[^>]+>/g, "").trim()) // Strip inline cue tags like <00:00:00.160><c>
       .filter((line, index, self) => line && self.indexOf(line) === index) // Remove duplicate lines
       .join(" ");
 
-    console.log("📝 Transcript Extracted!");
+    if (!subtitles || subtitles.trim().length === 0) {
+      return NextResponse.json(
+        { error: "Transcript was empty or could not be parsed." },
+        { status: 422 }
+      );
+    }
+
+    console.log(`📝 Transcript Extracted! Length: ${subtitles.length} characters`);
 
     // ✅ OpenRouter configuration
     const apiKey = process.env.OPENROUTER_API_KEY || process.env.OPENAI_API_KEY;
@@ -124,9 +155,13 @@ export async function POST(req: Request) {
         messages: [
           {
             role: "system",
-            content: `You are an expert academic tutor and lecture summarizer. Provide a concise, well-structured summary of this YouTube lecture with key takeaways and clear bullet points (In this Language: ${lang}).`,
+            content: `You are an expert academic tutor and lecture summarizer. The following is a raw transcript from a YouTube video or lecture (which may be in the original spoken audio language). Provide a comprehensive, well-structured summary featuring:
+- An Executive Overview
+- Key Concepts & Core Takeaways
+- Structured Bullet Points
+Produce and write the entire summary strictly in this requested language: ${lang}.`,
           },
-          { role: "user", content: subtitles },
+          { role: "user", content: subtitles.slice(0, 45000) },
         ],
         max_tokens: 1500,
       }),
