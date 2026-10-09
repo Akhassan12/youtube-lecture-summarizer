@@ -39,8 +39,8 @@ An intelligent lecture summarizer that automatically extracts transcripts and su
 Clone the repository and install dependencies:
 
 ```bash
-git clone https://github.com/your-username/AI-Youtube-Lecture-Summarizer.git
-cd AI-Youtube-Lecture-Summarizer
+git clone https://github.com/Akhassan12/youtube-lecture-summarizer.git
+cd youtube-lecture-summarizer
 npm install
 ```
 
@@ -82,7 +82,7 @@ Open [http://localhost:3000](http://localhost:3000) in your browser to view the 
 
 - **Maintainer**: **Ali Hassan Kadri**
 - **Email**: [hasanqadri1990@gmail.com](mailto:hasanqadri1990@gmail.com)
-- **GitHub**: [Ali Hassan Kadri](https://github.com)
+- **GitHub**: [@Akhassan12](https://github.com/Akhassan12)
 
 Contributions, issues, and feature requests are welcome!
 
